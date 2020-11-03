@@ -5,7 +5,7 @@
 
 #define USER_WORD_0_DEFAULT ((uint32_t)0xd8e0c7ffLU)
 #define USER_WORD_1_DEFAULT ((uint32_t)0xfffffc5dLU)
-#define USER_WORD_0_BOOT_LOCK ((uint32_t)0xd8e0c7f9LU)
+#define USER_WORD_0_BOOT_LOCK ((uint32_t)0xd8e0c7faLU)
 #define USER_WORD_1_BOOT_LOCK ((uint32_t)0xfffffc5dLU)
 
 #define Assert(expr) ((void) 0)
@@ -475,70 +475,35 @@ status_code_e flash_write (uint16_t bytes_to_write, uint32_t flash_addr, const u
 */
 static void fuseSet(uint32_t user_word_0, uint32_t user_word_1)
 {
-  uint32_t temp = 0;
-
-  // Auxiliary space cannot be accessed if the security bit is set
+  uint32_t temp = 0;  // Auxiliary space cannot be accessed if the security bit is set
   if (NVMCTRL->STATUS.reg & NVMCTRL_STATUS_SB) {
-    Serial.println("security bit set! return");
-    return;
-  }
-
-  // if the fuses are already at the default value then return
-  if ((*((uint32_t *)NVMCTRL_AUX0_ADDRESS) == USER_WORD_0_DEFAULT) &&
-      (*(((uint32_t *)NVMCTRL_AUX0_ADDRESS) + 1) == USER_WORD_1_DEFAULT)) {
     return;
   }
 
   // Disable Cache
-  temp = NVMCTRL->CTRLB.reg;
-
-  NVMCTRL->CTRLB.reg = temp | NVMCTRL_CTRLB_CACHEDIS;
-
-  // Clear error flags
-  NVMCTRL->STATUS.reg |= NVMCTRL_STATUS_MASK;
-
-  // Set address, command will be issued elsewhere
+  temp = NVMCTRL->CTRLB.reg;  NVMCTRL->CTRLB.reg = temp | NVMCTRL_CTRLB_CACHEDIS;  // Clear error flags
+  NVMCTRL->STATUS.reg |= NVMCTRL_STATUS_MASK;  // Set address, command will be issued elsewhere
+  NVMCTRL->ADDR.reg = (NVMCTRL_AUX0_ADDRESS >> 1);  // Erase the user page
+  NVMCTRL->CTRLA.reg = NVMCTRL_CTRLA_CMD_EAR | NVMCTRL_CTRLA_CMDEX_KEY;  // Wait for NVM command to complete
+  while (!(NVMCTRL->INTFLAG.reg & NVMCTRL_INTFLAG_READY));  // Clear error flags
+  NVMCTRL->STATUS.reg |= NVMCTRL_STATUS_MASK;  // Set address, command will be issued elsewhere
+  NVMCTRL->ADDR.reg = (NVMCTRL_AUX0_ADDRESS >> 1);  // Erase the page buffer before buffering new data
+  NVMCTRL->CTRLA.reg = NVMCTRL_CTRLA_CMD_PBC | NVMCTRL_CTRLA_CMDEX_KEY;  // Wait for NVM command to complete
+  while (!(NVMCTRL->INTFLAG.reg & NVMCTRL_INTFLAG_READY));  // Clear error flags
+  NVMCTRL->STATUS.reg |= NVMCTRL_STATUS_MASK;  // Set address, command will be issued elsewhere
   NVMCTRL->ADDR.reg = (NVMCTRL_AUX0_ADDRESS >> 1);
-
-  // Erase the user page
-  NVMCTRL->CTRLA.reg = NVMCTRL_CTRLA_CMD_EAR | NVMCTRL_CTRLA_CMDEX_KEY;
-
-  // Wait for NVM command to complete
-  while (!(NVMCTRL->INTFLAG.reg & NVMCTRL_INTFLAG_READY));
-
-  // Clear error flags
-  NVMCTRL->STATUS.reg |= NVMCTRL_STATUS_MASK;
-
-  // Set address, command will be issued elsewhere
-  NVMCTRL->ADDR.reg = (NVMCTRL_AUX0_ADDRESS >> 1);
-
-  // Erase the page buffer before buffering new data
-  NVMCTRL->CTRLA.reg = NVMCTRL_CTRLA_CMD_PBC | NVMCTRL_CTRLA_CMDEX_KEY;
-
-  // Wait for NVM command to complete
-  while (!(NVMCTRL->INTFLAG.reg & NVMCTRL_INTFLAG_READY));
-
-  // Clear error flags
-  NVMCTRL->STATUS.reg |= NVMCTRL_STATUS_MASK;
-
-  // Set address, command will be issued elsewhere
-  NVMCTRL->ADDR.reg = (NVMCTRL_AUX0_ADDRESS >> 1);
-
   // write the default fuses values to the memory buffer
-  *((uint32_t *)NVMCTRL_AUX0_ADDRESS) = USER_WORD_0_DEFAULT;
-  *(((uint32_t *)NVMCTRL_AUX0_ADDRESS) + 1) = USER_WORD_1_DEFAULT;
-
-  // Write the user page
-  NVMCTRL->CTRLA.reg = NVMCTRL_CTRLA_CMD_WAP | NVMCTRL_CTRLA_CMDEX_KEY;
-
-  // Restore the settings
+  *((uint32_t *)NVMCTRL_AUX0_ADDRESS) = user_word_0;
+  *(((uint32_t *)NVMCTRL_AUX0_ADDRESS) + 1) = user_word_1;  // Write the user page
+  NVMCTRL->CTRLA.reg = NVMCTRL_CTRLA_CMD_WAP | NVMCTRL_CTRLA_CMDEX_KEY;  // Restore the settings
   NVMCTRL->CTRLB.reg = temp;
 }
 
 void setup (void)
 {
     Serial.begin(115200);
-    delay(2000);
+    while(!Serial);
+    delay(500);
     Serial.print("flash config...");
     configure_nvm();
     Serial.println("done!");
@@ -549,13 +514,21 @@ void setup (void)
     firmware.size = sizeof(binary2Write) / sizeof(binary2Write[0]);
     firmware.dl_size = firmware.to_write_sz = 0;
 
-    Serial.print("set fuse to default...");
-    fuseSet(USER_WORD_0_DEFAULT, USER_WORD_1_DEFAULT);
-    Serial.println("done!");
+    // check if bootprot fuse is disabled
+    if ((*((uint32_t *)NVMCTRL_AUX0_ADDRESS) != USER_WORD_0_DEFAULT) ||
+       (*(((uint32_t *)NVMCTRL_AUX0_ADDRESS) + 1) != USER_WORD_1_DEFAULT)) {
+          Serial.print("set fuses to default...");
+          fuseSet(USER_WORD_0_DEFAULT, USER_WORD_1_DEFAULT);
+          Serial.println("done!");
+          Serial.println("Fuses set to default state. The board is going to reset to make changes effective.");
+          Serial.println();
+          Serial.println("Please close and open again the serial terminal to continue the uptading.");
+          delay(100);
+          NVIC_SystemReset();
+    }
     Serial.print("partition erase...");
     partition_erase(firmware.StartAddr, firmware.EndAddr);
     Serial.println("done!");
-
     Serial.print("writing flash...");
     if (flash_write(firmware.size, firmware.CurrAddr, binary2Write) == STATUS_OK){
         Serial.println("done!");
@@ -563,12 +536,12 @@ void setup (void)
         fuseSet(USER_WORD_0_BOOT_LOCK, USER_WORD_1_BOOT_LOCK);
         Serial.println("done!");
     }
-    Serial.print("End!");
-
-    while(1);
+    Serial.println("Bootloader has been updated. The board is now going to reset.");
+    Serial.println("Load a new sketch in the board to try new bootloader features.");
+    delay(200);
+    NVIC_SystemReset();
 }
 
 void loop (void)
 {
-
 }
